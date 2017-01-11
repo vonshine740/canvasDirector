@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge">
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1, minimum-scale=1,user-scalable=no">
+	<title>testing</title>
+	<style type="text/css">
+		*{
+			margin: 0;
+			padding: 0;
+		}
+		html,
+		body{
+			width: 100%;
+			height: 100%;
+			overflow: hidden;
+		}
+		#container{
+			width: 100%;
+			height: 100%;
+		}
+		#stop{
+			position: absolute;
+			top: 10px;
+			right: 10px;
+			z-index: 10;
+		}
+	</style>
+</head>
+<body>
+	<section id="container">
+		<canvas id="canvas"></canvas>
+		<button id="stop">stop</button>
+	</section>
+
+	<script type="text/javascript" src="./js/observer.js"></script>
+	<script type="text/javascript" src="./requestNextAnimationFrame.js"></script>
+	<script type="text/javascript">
+
+
+	// 脚本放映机
+	var Player = function( options ){
+		var timer = 0,		// 记录当前播放时间
+			boundry = 0,	// 记录持续动画开始点
+			position, 		// 记录当前绘制位置
+			status,			// 记录当前放映机状态 - play, - pause, - stop, - seeking
+			sheetPool = [],	// 放映过的脚本缓冲池
+			pointer = 0,	// 脚本位置指示器
+			doneFrames = 0,	// 当前阶段已刷新的帧数
+			speed,			// 放映绘制速度（自动计算）
+			tools,			// 辅助方法集合
+			painter,		// canvas绘图的操作方法
+			defaults,		// 放映机配置参数
+			config,
+			attrMap;		// 属性样式映射关系
+
+		attrMap = {
+			line: {
+				width: 'lineWidth',
+				color: 'strokeStyle',
+				clip: 'lineCap',
+				opacity: 'globalAlpha'
+			}
+		};
+
+		defaults = {
+			frames: 22, 		// 放映帧率
+			// sheet: ['json']	// 放映脚本
+			debug: true
+		};
+
+		tools = {
+			extend: function( src, add ){
+				if( !add ) {
+					return src;
+				};
+				for(var i in add ){
+					src[i] = add[i];
+				}
+				return src;
+			},
+			getFPS: (function (){
+				var lastTime = 0;
+				return function( delay ){
+					if( delay ){
+						return parseInt( 1000 / delay, 10 );
+					}
+					var now = (+new Date()),
+						fps = 1000 / (now - lastTime);
+					lastTime = now;
+					return parseInt(fps, 10);
+				}
+			})(),
+			showDebug: (function () {
+				var template = document.createElement('ul'),
+					style = document.createElement('style'),
+					fps = document.createElement('li');
+					position = document.createElement('li');
+					template.appendChild(fps);
+				style.innerHTML = '\
+						.debug{ position: absolute; z-index: 10; top: 10px; left: 10px; font-size: 20px; }\
+					';
+				document.head.appendChild(style);
+				template.className = 'debug';
+				return function(){
+					fps.innerHTML = 'FPS: ' + tools.getFPS();
+					config.context.canvas.parentNode.appendChild(template);	
+				}
+			})(),
+			sheetAnalyse: function(){
+				
+			},
+			getSpeed: function( conf ){	// 像素/帧 = 毫秒/帧 * 像素/秒
+				switch (conf.type) {
+					case 'line':
+						return {
+							x: ( conf.data.to.x - conf.data.from.x ) / conf.duration * 1 / config.frames,
+							y: ( conf.data.to.y - conf.data.from.y ) / conf.duration * 1 / config.frames,
+						};
+						break;
+					case 'arc':
+						var from = this.tranferDegree(conf.data.from),
+							to = this.tranferDegree(conf.data.to);
+						return {
+							arc: ( to - from ) / (config.frames * conf.duration - doneFrames),
+						};
+						break;
+					default: 
+						break;
+				}
+			},
+			tranferDegree: function( degree ){
+				return Math.PI * degree / 180;
+			}
+		};
+
+		// 绘制的具体方法
+		painter = {
+			style: null,
+			data: null,
+			line: (function( ){
+				var style,
+					from,
+					to,
+					image;
+				return function( c, info, callback ){
+					style = info.style;
+					from = info.from;
+
+					if( info !== this.data ){
+						position = from;
+						image = c.getImageData(0, 0, c.canvas.width, c.canvas.height);
+					}
+					this.data = info;
+
+					speed = tools.getSpeed( {
+						type: 'line',
+						data: {
+							from: position,
+							to: info.to
+						},
+						duration: info.duration
+					} );
+
+					to = {
+						x: position.x + speed.x,
+						y: position.y + speed.y
+					};
+					position = to;
+
+					if(style !== this.style){
+						for(var i in style){
+							c[attrMap.line[i]] = style[i];
+						}
+					}
+
+					this.style = style;
+					c.save();
+					c.clearRect( 0, 0, c.canvas.width, c.canvas.height );
+					image && c.putImageData( image, 0, 0 );
+					c.beginPath();
+					c.moveTo(from.x, from.y);
+					c.lineTo(to.x, to.y);
+					c.restore();
+					c.stroke();
+
+					callback && callback();
+				}
+			})(),
+			arc: (function( ){
+				var style,
+					from,
+					to,
+					center,
+					image;
+				return function( c, info, callback ){
+					style = info.style;
+					from = tools.tranferDegree( info.degree.from );
+					center = info.center;
+
+					if( info !== this.data ){
+						position = from;
+						image = c.getImageData(0, 0, c.canvas.width, c.canvas.height);
+					}
+					this.data = info;
+
+					speed = tools.getSpeed( {
+						type: 'arc',
+						data: {
+							from: position*180/Math.PI,			// 渐变
+							to: info.degree.to					// 不变
+						},
+						duration: info.duration
+					} );
+
+					to = position + speed.arc;
+					position = to;
+
+					if(style !== this.style){
+						for(var i in style){
+							c[attrMap.line[i]] = style[i];
+						}
+					}
+
+					this.style = style;
+					c.save();
+					c.clearRect( 0, 0, c.canvas.width, c.canvas.height );
+					image && c.putImageData( image, 0, 0 );
+					c.beginPath();
+					c.arc( center.x, center.y, info.radius, from, to, info.direction );
+					c.restore();
+					c.stroke();
+
+					callback && callback();
+				}
+			})(),
+			image: function( c, s, p ){
+
+			}
+		};
+
+		config = tools.extend( defaults, options );
+
+		function play () {
+			var canPlay = verification();
+			if( canPlay ){
+				applyStatus();
+				status = 'play';
+				render();
+				setInterval(function(){
+					console.log('-----------------------');
+				},1000);
+			}
+		}
+
+		function pause () {
+			console.log('pause');
+		}
+
+		function stop (){
+			status = 'stop';
+			console.log('stop');
+		}
+
+		function seek (){
+			console.log('seek');
+		}
+
+		function installSheet () {
+			console.log('installSheet');
+		}
+
+		function replay () {
+			console.log('replay');
+		}
+
+		var applyStatus = (function() {
+			// 1、更改canvas坐标系统为数学坐标系
+			config.context.translate( 0, config.context.canvas.height);
+			config.context.scale(1, -1);
+			return function(){
+				// 2、修正画笔初始位置
+				var l = sheetPool.length;
+				if( config.sheet[pointer] && config.sheet[pointer].from ){
+					position = config.sheet[pointer].from;
+				}else if( sheetPool && sheetPool.length > 0 ){
+					position = sheetPool[l-1].to;
+				}
+				// 3、记录当前动画开始时间点
+				boundry = +new Date();
+			}
+		})();
+
+		function render () {
+			if( status !== 'play' ){
+				return false;
+			}
+
+			var time = +new Date(),
+				delay = time - timer;
+
+			requestNextAnimationFrame(render);
+
+			if( config.debug ){
+				tools.showDebug( );
+			}
+
+			if( 1000 / delay > config.frames ){		//	保证刷新频率接近配置值
+				return false;
+			}
+			timer = time;
+			animate();
+		}
+
+		function verification () {
+			// 检验必要组件是否配置成功
+			// 脚本配置
+			if( !config.sheet || config.sheet.length < 1 ){
+				return false;
+			}
+			return true;
+		}
+
+		function animate () {
+			var time = +new Date(),
+				current = config.sheet[pointer];
+				doneFrames++;
+			if(!current){
+				stop();
+				return false;
+			}
+			if( (time - boundry) >= current.duration*1000 ){
+				painter[current.type]( config.context, current, function(){
+					sheetPool.push( config.sheet[pointer] );
+					pointer++;
+					applyStatus();
+					doneFrames = 0;
+				} );
+				return false;
+			}
+			painter[current.type]( config.context, current );
+		}
+
+
+		return {
+			play: play,
+			replay: replay,
+			pause: pause,
+			stop: stop,
+			seek: seek,
+			installSheet: installSheet
+		};
+	};
+
+
+		window.onload = function(){
+			var canvas = document.getElementById('canvas'),
+				context = canvas.getContext('2d'),
+				width = document.body.offsetWidth,
+				height = document.body.offsetHeight;
+			canvas.width = width;
+			canvas.height = height;
+
+			// 绘制脚本
+			var sheet = [
+				{
+					type: 'arc',
+					center: {
+						x: width/2,
+						y: height/2
+					},
+					radius: 50,
+					degree:{
+						from: 0,
+						to: 360
+					},
+					direction: false,
+					duration: 1,
+					style: {
+						width: 5,
+						color: '#f00',
+						opacity: .5,
+						clip: 'round'
+					}
+				},
+				{
+					type: 'arc',
+					center: {
+						x: width/2-20,
+						y: height/2
+					},
+					radius: 20,
+					degree:{
+						from: 75,
+						to: 115
+					},
+					direction: false,
+					duration: .5,
+					style: {
+						width: 5,
+						color: '#f00',
+						opacity: .5,
+						clip: 'round'
+					}
+				},
+				{
+					type: 'arc',
+					center: {
+						x: width/2+20,
+						y: height/2
+					},
+					radius: 20,
+					degree:{
+						from: 115,
+						to: 75
+					},
+					direction: true,
+					duration: .5,
+					style: {
+						width: 5,
+						color: '#f00',
+						opacity: .5,
+						clip: 'round'
+					}
+				},
+				{
+					type: 'arc',
+					center: {
+						x: width/2,
+						y: height/2
+					},
+					radius: 30,
+					degree:{
+						from: 230,
+						to: 312
+					},
+					direction: false,
+					duration: .5,
+					style: {
+						width: 5,
+						color: '#f00',
+						opacity: .5,
+						clip: 'round'
+					}
+				},
+				{
+					type: 'line',
+					from: {
+						x: 50,
+						y: 0
+					},
+					to: {
+						x: 50,
+						y: 200
+					},
+					duration: 1,
+					style: {
+						width: 5,
+						color: '#000',
+						opacity: .5,
+						clip: 'round'
+					}
+				}
+			];
+
+			var player = Player({
+				sheet: sheet,
+				context: context
+			});
+			context.rect(0, 0, canvas.width, canvas.height);
+			context.fillStyle = '#eee';
+			context.fill();
+			// player.play();
+			var btn = document.getElementById('stop');
+			btn.onclick = function(){
+				player.play();
+				// player.stop();
+			}
+
+			// setTimeout(function(){
+			// 	alert();
+			// 	var canvas2 = document.getElementById('canvas2');
+			// 	var ctx2 = canvas2.getContext('2d');
+			// 	var image = context.getImageData(0, 0, canvas2.width, canvas.height);
+			// 	canvas2.width = canvas.width;
+			// 	canvas2.height = canvas.height;
+			// 	ctx2.translate( 0, canvas2.height);
+			// 	ctx2.scale(1, -1);
+			// 	context.beginPath();
+			// 	context.arc(canvas.width/2, canvas.height/2, 20, 0, Math.PI*2);
+			// 	context.stroke();
+			// 	image && ctx2.putImageData( image, 0, 0 );
+			// }, 3000);
+		};
+	</script>
+</body>
+</html>
