@@ -39,17 +39,19 @@
 	<script type="text/javascript">
 
 
-	// 脚本放映机
+	// 脚本放映机	基于时间轴的方式放映【可并行执行动画】
+	// 精确度控制的在0.5毫秒内
 	var Player = function( options ){
 		var timer = 0,		// 记录当前播放时间
 			boundry = 0,	// 记录持续动画开始点
-			position, 		// 记录当前绘制位置
+			position ={}, 	// 记录当前绘制位置
 			status,			// 记录当前放映机状态 - play, - pause, - stop, - seeking
-			sheetPool = [],	// 放映过的脚本缓冲池
-			pointer = 0,	// 脚本位置指示器
+			sheetPool = {},	// 放映过的脚本缓冲池
+			fnsPool = {},	// 绘画方法缓冲池
 			doneFrames = 0,	// 当前阶段已刷新的帧数
 			speed,			// 放映绘制速度（自动计算）
 			tools,			// 辅助方法集合
+			imageData,		// canvas绘图表面团
 			painter,		// canvas绘图的操作方法
 			defaults,		// 放映机配置参数
 			config,
@@ -64,8 +66,12 @@
 			}
 		};
 
+		// setInterval(function(){
+		// 	// console.log(fnsPool);
+		// }, 500);
+
 		defaults = {
-			frames: 22, 		// 放映帧率
+			frames: 24, 		// 放映帧率
 			// sheet: ['json']	// 放映脚本
 			debug: true
 		};
@@ -96,7 +102,7 @@
 				var template = document.createElement('ul'),
 					style = document.createElement('style'),
 					fps = document.createElement('li');
-					position = document.createElement('li');
+					// position = document.createElement('li');
 					template.appendChild(fps);
 				style.innerHTML = '\
 						.debug{ position: absolute; z-index: 10; top: 10px; left: 10px; font-size: 20px; }\
@@ -108,8 +114,22 @@
 					config.context.canvas.parentNode.appendChild(template);	
 				}
 			})(),
-			sheetAnalyse: function(){
-				
+			sheetAnalyse: function( callback ){
+				var sheet = config.sheet;
+
+				// 判断动画在时间上执行类型
+				for(var i1 = 0, l1 = sheet.length; i1 < l1; i1++){
+					// 单次执行
+					var random = parseInt(Math.random()*100) + '',
+						id = +new Date()+'' + random,
+						start = this.formatTime(sheet[i1].time.start),
+						end = this.formatTime(sheet[i1].time.start + sheet[i1].time.duration);
+					sheet[i1].id = id;
+					sheetPool[id] = sheet[i1];
+					Event.listen('start'+start, this.response);
+					Event.listen('end'+end, this.response);
+				}
+				callback && callback();
 			},
 			getSpeed: function( conf ){	// 像素/帧 = 毫秒/帧 * 像素/秒
 				switch (conf.type) {
@@ -120,10 +140,10 @@
 						};
 						break;
 					case 'arc':
-						var from = this.tranferDegree(conf.data.from),
-							to = this.tranferDegree(conf.data.to);
+						var from = this.tranferDegree(conf.degree.from),
+							to = this.tranferDegree(conf.degree.to);
 						return {
-							arc: ( to - from ) / (config.frames * conf.duration - doneFrames),
+							arc: ( to - from ) / (config.frames * conf.time.duration),
 						};
 						break;
 					default: 
@@ -132,7 +152,67 @@
 			},
 			tranferDegree: function( degree ){
 				return Math.PI * degree / 180;
-			}
+			},
+			initFuns: (function(){
+				var initPointer = 0;
+				return function( callback ){
+					// 根据时间timer遍历，依次缓存相关的绘画方法和初始化各绘画动作画笔位置
+					// 第一次执行，插入方法，初始化画笔位置
+					if( initPointer <= 0 ){
+						console.log(sheetPool);
+						sheetPool && (function(){
+							for(var i in sheetPool ){
+								console.log(i);
+								fnsPool[sheetPool[i].id] = {
+									id: sheetPool[i].id,
+									time: sheetPool[i].time,
+									fn: painter[sheetPool[i].type],
+									play: false,
+									speed: tools.getSpeed(sheetPool[i])
+								};
+								position[sheetPool[i].id] = sheetPool[i].from || sheetPool[i].degree.from;
+							}
+						})();
+					}else{
+						var time = timer/1000;
+						time = parseFloat(time, 10).toFixed(1);
+						time = this.formatTime(time);
+						console.log('Current is at '+time);
+						Event.trigger('start'+time, 'start', time);
+						Event.trigger('end'+time, 'end', time);
+					}
+
+					initPointer++;
+					callback && callback();
+				}
+			})(),
+			response: function(type, time){
+				for( var j in fnsPool ){
+					if( fnsPool[j].time.start === time && type === 'start' ){
+						console.log('start'+time);
+						fnsPool[j].play = true;
+					}
+					if( fnsPool[j].time.start + fnsPool[j].time.duration === time && type === 'end' ){
+						console.log('end'+time);
+						fnsPool[j].play = false;
+					}
+				}
+			},
+			formatTime: function( time ){
+				return (time - parseInt(time, 10)) > 0.5 ? parseInt(time, 10)+1 : ( (time - parseInt(time, 10)) === 0.5 ? (parseInt(time, 10))+0.5 : parseInt(time, 10))
+			},
+			arrayExecute: (function(){
+				return function( fnsArray, pointer ){
+					if(fnsArray[pointer]){
+						console.log('Executing funs '+ pointer);
+						fnsArray[pointer].fn(config.context, sheetPool[fnsArray[pointer].id], function(){
+							console.log('Finishing funs '+pointer);
+							pointer++;
+							tools.arrayExecute( fnsArray, pointer );
+						});
+					}
+				};
+			})()
 		};
 
 		// 绘制的具体方法
@@ -142,32 +222,30 @@
 			line: (function( ){
 				var style,
 					from,
-					to,
-					image;
+					to;
 				return function( c, info, callback ){
 					style = info.style;
 					from = info.from;
 
 					if( info !== this.data ){
-						position = from;
-						image = c.getImageData(0, 0, c.canvas.width, c.canvas.height);
+						position[info.id].pos = from;
+						// image = c.getImageData(0, 0, c.canvas.width, c.canvas.height);
 					}
-					this.data = info;
 
 					speed = tools.getSpeed( {
 						type: 'line',
 						data: {
-							from: position,
+							from: position[info.id].pos,
 							to: info.to
 						},
 						duration: info.duration
 					} );
 
 					to = {
-						x: position.x + speed.x,
-						y: position.y + speed.y
+						x: position[info.id].pos.x + speed.x,
+						y: position[info.id].pos.y + speed.y
 					};
-					position = to;
+					position[info.id].pos = to;
 
 					if(style !== this.style){
 						for(var i in style){
@@ -177,7 +255,7 @@
 
 					this.style = style;
 					c.save();
-					c.clearRect( 0, 0, c.canvas.width, c.canvas.height );
+					// c.clearRect( 0, 0, c.canvas.width, c.canvas.height );
 					image && c.putImageData( image, 0, 0 );
 					c.beginPath();
 					c.moveTo(from.x, from.y);
@@ -193,29 +271,23 @@
 					from,
 					to,
 					center,
-					image;
+					speed,
+					imageData;
 				return function( c, info, callback ){
 					style = info.style;
 					from = tools.tranferDegree( info.degree.from );
 					center = info.center;
 
 					if( info !== this.data ){
-						position = from;
-						image = c.getImageData(0, 0, c.canvas.width, c.canvas.height);
+						position[info.id].pos = from;
+						imageData = c.getImageData(0, 0, c.canvas.width, c.canvas.height);
 					}
 					this.data = info;
 
-					speed = tools.getSpeed( {
-						type: 'arc',
-						data: {
-							from: position*180/Math.PI,			// 渐变
-							to: info.degree.to					// 不变
-						},
-						duration: info.duration
-					} );
+					obj = fnsPool[info.id];
 
-					to = position + speed.arc;
-					position = to;
+					to = position[info.id] + obj.speed.arc;
+					position[info.id] = to;
 
 					if(style !== this.style){
 						for(var i in style){
@@ -225,14 +297,14 @@
 
 					this.style = style;
 					c.save();
-					c.clearRect( 0, 0, c.canvas.width, c.canvas.height );
-					image && c.putImageData( image, 0, 0 );
+					// c.clearRect( 0, 0, c.canvas.width, c.canvas.height );
+					// imageData && c.putImageData( imageData, 0, 0 );
 					c.beginPath();
 					c.arc( center.x, center.y, info.radius, from, to, info.direction );
 					c.restore();
 					c.stroke();
 
-					callback && callback();
+					callback && callback( c, info );
 				}
 			})(),
 			image: function( c, s, p ){
@@ -248,9 +320,6 @@
 				applyStatus();
 				status = 'play';
 				render();
-				setInterval(function(){
-					console.log('-----------------------');
-				},1000);
 			}
 		}
 
@@ -267,9 +336,18 @@
 			console.log('seek');
 		}
 
-		function installSheet () {
+		function installSheet ( sheet ) {
+			if( !sheet || !(sheet instanceof Array) ){
+				console.error('sheet is an json!');
+				return false;
+			}
+			config.sheet = sheet;
+			tools.sheetAnalyse( function(){
+				tools.initFuns()
+			} );
 			console.log('installSheet');
 		}
+		installSheet( config.sheet );
 
 		function replay () {
 			console.log('replay');
@@ -280,38 +358,34 @@
 			config.context.translate( 0, config.context.canvas.height);
 			config.context.scale(1, -1);
 			return function(){
-				// 2、修正画笔初始位置
-				var l = sheetPool.length;
-				if( config.sheet[pointer] && config.sheet[pointer].from ){
-					position = config.sheet[pointer].from;
-				}else if( sheetPool && sheetPool.length > 0 ){
-					position = sheetPool[l-1].to;
-				}
-				// 3、记录当前动画开始时间点
-				boundry = +new Date();
+				// imageData = config.context.getImageData(0, 0, config.context.canvas.width, config.context.canvas.height);
 			}
 		})();
 
-		function render () {
-			if( status !== 'play' ){
-				return false;
+		var render = (function  () {
+			var timecache = 0;
+			return function(){
+				if( status !== 'play' ){
+					return false;
+				}
+
+				var time = +new Date(),
+					delay = time - timecache;
+
+				requestNextAnimationFrame(render);
+
+				if( config.debug ){
+					tools.showDebug( );
+				}
+
+				if( 1000 / delay > config.frames ){		//	保证刷新频率接近配置值
+					return false;
+				}
+				timecache && (timer = timer + delay);
+				timecache = time;
+				animate();
 			}
-
-			var time = +new Date(),
-				delay = time - timer;
-
-			requestNextAnimationFrame(render);
-
-			if( config.debug ){
-				tools.showDebug( );
-			}
-
-			if( 1000 / delay > config.frames ){		//	保证刷新频率接近配置值
-				return false;
-			}
-			timer = time;
-			animate();
-		}
+		})();
 
 		function verification () {
 			// 检验必要组件是否配置成功
@@ -323,23 +397,17 @@
 		}
 
 		function animate () {
-			var time = +new Date(),
-				current = config.sheet[pointer];
-				doneFrames++;
-			if(!current){
-				stop();
-				return false;
-			}
-			if( (time - boundry) >= current.duration*1000 ){
-				painter[current.type]( config.context, current, function(){
-					sheetPool.push( config.sheet[pointer] );
-					pointer++;
-					applyStatus();
-					doneFrames = 0;
-				} );
-				return false;
-			}
-			painter[current.type]( config.context, current );
+			// 检查哪些方法执行完毕，将他们删除，然后依次执行需要执行的方法
+
+			tools.initFuns(function(){
+				var fnsArray = [];
+				for( var i in fnsPool ){
+					if( fnsPool[i] && fnsPool[i].play && fnsPool[i].fn ){
+						fnsArray.push( fnsPool[i] );
+					}
+				}
+				fnsArray.length>0 && tools.arrayExecute( fnsArray, 0 );
+			});
 		}
 
 
@@ -352,6 +420,51 @@
 			installSheet: installSheet
 		};
 	};
+	// 简单的观察者模式
+	var Event = {
+		clientList: {},
+		listen: function(key, fn){
+			if(!this.clientList[key]){
+				this.clientList[key] = [];
+			}
+			this.clientList[key].push(fn);
+		},
+		remove: function(key, fn){
+			var fns = this.clientList[key];
+			if(!fns){
+				return false;
+			}
+
+			if(!fn){
+				fns && (fns.length = 0);
+			}else{
+				for(var l = fns.length-1; l>=0; l--){
+					if( fns[l] === fn ){
+						fns.splice(l, 1);
+					}
+				}
+			}
+		},
+		trigger: function(){
+			var key = [].shift.call(arguments),
+				fns = this.clientList[key];
+			if(!fns || fns.length === 0){
+				return false;
+			}
+			for(var i = 0, fn; fn = fns[i++];){
+				fn.apply(this, arguments);
+			}
+		},
+		debug: (function(){
+			return function(){
+				var that = this;
+				setInterval(function(){
+					console.log(that.clientList);
+				}, 1000);
+			}
+		})()
+	};
+	Event.debug();
 
 
 		window.onload = function(){
@@ -376,97 +489,67 @@
 						to: 360
 					},
 					direction: false,
-					duration: 1,
+					time: {
+						start: 1,
+						duration: 8
+					},
 					style: {
 						width: 5,
 						color: '#f00',
-						opacity: .5,
+						opacity: .1,
 						clip: 'round'
 					}
 				},
 				{
 					type: 'arc',
 					center: {
-						x: width/2-20,
-						y: height/2
-					},
-					radius: 20,
-					degree:{
-						from: 75,
-						to: 115
-					},
-					direction: false,
-					duration: .5,
-					style: {
-						width: 5,
-						color: '#f00',
-						opacity: .5,
-						clip: 'round'
-					}
-				},
-				{
-					type: 'arc',
-					center: {
-						x: width/2+20,
-						y: height/2
-					},
-					radius: 20,
-					degree:{
-						from: 115,
-						to: 75
-					},
-					direction: true,
-					duration: .5,
-					style: {
-						width: 5,
-						color: '#f00',
-						opacity: .5,
-						clip: 'round'
-					}
-				},
-				{
-					type: 'arc',
-					center: {
-						x: width/2,
-						y: height/2
+						x: width/4,
+						y: height/4
 					},
 					radius: 30,
 					degree:{
-						from: 230,
-						to: 312
+						from: 0,
+						to: 360
 					},
 					direction: false,
-					duration: .5,
+					time: {
+						start: 2,
+						duration: 3
+					},
 					style: {
 						width: 5,
 						color: '#f00',
-						opacity: .5,
-						clip: 'round'
-					}
-				},
-				{
-					type: 'line',
-					from: {
-						x: 50,
-						y: 0
-					},
-					to: {
-						x: 50,
-						y: 200
-					},
-					duration: 1,
-					style: {
-						width: 5,
-						color: '#000',
 						opacity: .5,
 						clip: 'round'
 					}
 				}
+				// ,{
+				// 	type: 'line',
+				// 	from: {
+				// 		x: 50,
+				// 		y: 0
+				// 	},
+				// 	to: {
+				// 		x: 50,
+				// 		y: 200
+				// 	},
+				// 	time: {
+				// 		start: 2,
+				// 		duration: 3
+				// 	},
+				// 	style: {
+				// 		width: 5,
+				// 		color: '#000',
+				// 		opacity: .5,
+				// 		clip: 'round'
+				// 	}
+				// }
 			];
 
 			var player = Player({
 				sheet: sheet,
-				context: context
+				context: context,
+				frames: 12
 			});
 			context.rect(0, 0, canvas.width, canvas.height);
 			context.fillStyle = '#eee';
@@ -477,21 +560,6 @@
 				player.play();
 				// player.stop();
 			}
-
-			// setTimeout(function(){
-			// 	alert();
-			// 	var canvas2 = document.getElementById('canvas2');
-			// 	var ctx2 = canvas2.getContext('2d');
-			// 	var image = context.getImageData(0, 0, canvas2.width, canvas.height);
-			// 	canvas2.width = canvas.width;
-			// 	canvas2.height = canvas.height;
-			// 	ctx2.translate( 0, canvas2.height);
-			// 	ctx2.scale(1, -1);
-			// 	context.beginPath();
-			// 	context.arc(canvas.width/2, canvas.height/2, 20, 0, Math.PI*2);
-			// 	context.stroke();
-			// 	image && ctx2.putImageData( image, 0, 0 );
-			// }, 3000);
 		};
 	</script>
 </body>
